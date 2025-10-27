@@ -4,6 +4,7 @@ const path = require('path');
 const http = require('http');
 const { URL } = require('url');
 const { OAuth2Client } = require('google-auth-library');
+const OpenAI = require('openai');
 
 
 const REDIRECT_PROTOCOL = 'emailreader';
@@ -16,8 +17,10 @@ const SCOPES = [
 let createWindow;
 
 const oauthConfigPath = path.join(__dirname, 'oauth.config.json');
+// const openaiConfigPath = path.join(__dirname, 'openaiconfig.json');
 let CLIENT_ID;
 let CLIENT_SECRET;
+let OPENAI_API_KEY;
 
 try {
     const rawConfig = fs.readFileSync(oauthConfigPath, 'utf-8');
@@ -32,6 +35,128 @@ try {
     console.error('[OAuth] Failed to load desktop credentials from oauth.config.json.');
     console.error('Create oauth.config.json (see oauth.config.example.json) and paste the clientId/clientSecret from your Google Desktop OAuth client.');
     throw err;
+}
+
+// try {
+//     const rawOpenAIConfig = fs.readFileSync(openaiConfigPath, 'utf-8');
+//     const parsedOpenAIConfig = JSON.parse(rawOpenAIConfig);
+//     OPENAI_API_KEY = parsedOpenAIConfig.apiKey;
+// } catch (err) {
+//     console.error('[OpenAI] Failed to load API key from openaiconfig.json.');
+//     console.error('Create openaiconfig.json and paste your OpenAI API key.');
+//     throw err;
+// }
+
+const openai = new OpenAI();
+
+
+function decodeBase64Url(input) {
+    if (!input) return '';
+    const normalized = input.replace(/-/g, '+').replace(/_/g, '/');
+    const padding = normalized.length % 4 === 0 ? '' : '='.repeat(4 - (normalized.length % 4));
+    return Buffer.from(normalized + padding, 'base64').toString('utf8');
+}
+
+function stripHtmlTags(html) {
+    if (!html) return '';
+    return html.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function extractPlainTextFromPayload(payload) {
+    if (!payload) return '';
+
+    if (payload.mimeType === 'text/plain' && payload.body && payload.body.data) {
+        return decodeBase64Url(payload.body.data).trim();
+    }
+
+    if (payload.mimeType === 'text/html' && payload.body && payload.body.data) {
+        return stripHtmlTags(decodeBase64Url(payload.body.data));
+    }
+
+    if (payload.body && payload.body.data) {
+        return decodeBase64Url(payload.body.data).trim();
+    }
+
+    if (Array.isArray(payload.parts)) {
+        for (const part of payload.parts) {
+            const text = extractPlainTextFromPayload(part);
+            if (text) return text;
+        }
+    }
+
+    return '';
+}
+
+function parseGmailMessage(message) {
+    if (!message || !message.payload) return null;
+
+    const headers = message.payload.headers || [];
+    const findHeader = (name) => {
+        const header = headers.find((h) => h.name && h.name.toLowerCase() === name.toLowerCase());
+        return header ? header.value : '';
+    };
+
+    const bodyText = extractPlainTextFromPayload(message.payload) || message.snippet || '';
+
+    return {
+        id: message.id,
+        subject: findHeader('Subject') || '(No subject)',
+        from: findHeader('From') || '',
+        date: findHeader('Date') || '',
+        snippet: message.snippet || '',
+        body: bodyText.trim(),
+    };
+}
+
+async function fetchInboxMessages(oauth2Client, count = 1) {
+    try {
+        const listResponse = await oauth2Client.request({
+            url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages',
+            params: {
+                maxResults: count,
+                labelIds: ['INBOX'],
+            },
+        });
+
+        const messages = listResponse.data && listResponse.data.messages;
+        if (!messages || messages.length === 0) {
+            console.log('No recent messages found in inbox.');
+            return [];
+        }
+
+        const results = [];
+        for (const metadata of messages) {
+            if (!metadata || !metadata.id) continue;
+            try {
+                const messageResponse = await oauth2Client.request({
+                    url: `https://gmail.googleapis.com/gmail/v1/users/me/messages/${metadata.id}`,
+                    params: {
+                        format: 'full',
+                    },
+                });
+                const parsed = parseGmailMessage(messageResponse.data);
+                try {
+                    const aiSummary = await openai.responses.create({
+                        model: 'gpt-5-nano',
+                        input: `Summarize this email in one sentence:\n\n${parsed.body}`,
+                    });
+                    parsed.summary = aiSummary.output_text;
+                } catch (e) {
+                    console.error('Failed to generate AI summary:', e);
+                }
+                if (aiSummary) {
+                    results.push(aiSummary);
+                }
+            } catch (messageError) {
+                console.error(`Failed to fetch message ${metadata.id}:`, messageError);
+            }
+        }
+
+        return results;
+    } catch (error) {
+        console.error('Failed to fetch Gmail messages:', error);
+        return [];
+    }
 }
 
 
@@ -92,6 +217,7 @@ async function startGoogleLogin() {
             if (oauth2Client) {
                 try {
                     const { tokens } = await oauth2Client.getToken(code);
+                    oauth2Client.setCredentials(tokens);
                     let profilePayload = null;
                     if (tokens.id_token) {
                         const ticket = await oauth2Client.verifyIdToken({
@@ -104,12 +230,16 @@ async function startGoogleLogin() {
                         console.warn('ID token missing from OAuth response; profile data unavailable.');
                     }
                     console.log('Login successful. Tokens:', tokens);
+
+                    const inboxEmails = await fetchInboxMessages(oauth2Client, 10);
+
                     const win = BrowserWindow.getAllWindows()[0];
                     if (win) {
                         win.webContents.send('auth-success', {
                             tokens,
                             profile: profilePayload,
                         });
+                        win.webContents.send('inbox-emails', inboxEmails);
                     }
                 } catch (error) {
                     console.error('Error exchanging code for tokens:', error);
@@ -206,7 +336,9 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
-    if (process.platform !== 'darwin' && process.platform !== 'win32') app.quit()
+    if (process.platform !== 'darwin' && process.platform !== 'win32') {
+        app.quit()
+    }
 })
 
 // IPC handlers: renderer -> main
@@ -216,5 +348,7 @@ ipcMain.on('start-google-login', () => {
 
 ipcMain.on('auth-redirect', (event, url) => {
     // Renderer can send a redirect URL string for the main process to handle
-    if (typeof url === 'string') handleGoogleAuthRedirect(url);
+    if (typeof url === 'string') {
+        handleGoogleAuthRedirect(url);
+    }
 });
