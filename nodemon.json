@@ -1,0 +1,16 @@
+{
+  "watch": [
+    "index.js",
+    "*.js",
+    "*.html",
+    "*.css",
+    "src"
+  ],
+  "ext": "js,html,css,json",
+  "ignore": [
+    "node_modules/*",
+    ".git/*"
+  ],
+  "exec": "electron .",
+  "delay": "250"
+}
