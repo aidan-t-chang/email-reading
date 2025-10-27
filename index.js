@@ -17,7 +17,7 @@ const SCOPES = [
 let createWindow;
 
 const oauthConfigPath = path.join(__dirname, 'oauth.config.json');
-// const openaiConfigPath = path.join(__dirname, 'openaiconfig.json');
+const openaiConfigPath = path.join(__dirname, 'openaiconfig.json');
 let CLIENT_ID;
 let CLIENT_SECRET;
 let OPENAI_API_KEY;
@@ -37,17 +37,32 @@ try {
     throw err;
 }
 
-// try {
-//     const rawOpenAIConfig = fs.readFileSync(openaiConfigPath, 'utf-8');
-//     const parsedOpenAIConfig = JSON.parse(rawOpenAIConfig);
-//     OPENAI_API_KEY = parsedOpenAIConfig.apiKey;
-// } catch (err) {
-//     console.error('[OpenAI] Failed to load API key from openaiconfig.json.');
-//     console.error('Create openaiconfig.json and paste your OpenAI API key.');
-//     throw err;
-// }
+OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;
+if (!OPENAI_API_KEY) {
+    try {
+        const rawOpenAIConfig = fs.readFileSync(openaiConfigPath, 'utf-8');
+        const parsedOpenAIConfig = JSON.parse(rawOpenAIConfig);
+        OPENAI_API_KEY = parsedOpenAIConfig.API_KEY || parsedOpenAIConfig.apiKey || null;
+        if (!OPENAI_API_KEY) {
+            throw new Error('Missing API_KEY property');
+        }
+    } catch (err) {
+        if (err && err.code === 'ENOENT') {
+            console.warn('[OpenAI] API key not available; AI summaries disabled.');
+        } else {
+            console.error('[OpenAI] Failed to load API key from openaiconfig.json.', err);
+        }
+    }
+}
 
-const openai = new OpenAI();
+let openai = null;
+if (OPENAI_API_KEY) {
+    try {
+        openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+    } catch (err) {
+        console.error('[OpenAI] Failed to initialize client.', err);
+    }
+}
 
 
 function decodeBase64Url(input) {
@@ -108,7 +123,7 @@ function parseGmailMessage(message) {
     };
 }
 
-async function fetchInboxMessages(oauth2Client, count = 1) {
+async function fetchInboxMessages(oauth2Client, count = 10) {
     try {
         const listResponse = await oauth2Client.request({
             url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages',
@@ -135,18 +150,25 @@ async function fetchInboxMessages(oauth2Client, count = 1) {
                     },
                 });
                 const parsed = parseGmailMessage(messageResponse.data);
-                try {
-                    const aiSummary = await openai.responses.create({
-                        model: 'gpt-5-nano',
-                        input: `Summarize this email in one sentence:\n\n${parsed.body}`,
-                    });
-                    parsed.summary = aiSummary.output_text;
-                } catch (e) {
-                    console.error('Failed to generate AI summary:', e);
+                if (!parsed) continue;
+                const summarySource = parsed.body || parsed.snippet;
+                if (openai && summarySource) {
+                    try {
+                        const aiSummary = await openai.responses.create({
+                            model: 'gpt-4.1-mini',
+                            input: `Summarize this email in one sentence and respond with any important times and dates in the format (date, time). 
+                            If there are no important dates, do not respond with anything but still provide a summary. \n\n${summarySource}`,
+                        });
+                        const summaryText = (aiSummary?.output_text || '').trim();
+                        if (summaryText) {
+                            console.log(summaryText);
+                            parsed.aiSummary = summaryText;
+                        }
+                    } catch (e) {
+                        console.error('Failed to generate AI summary:', e);
+                    }
                 }
-                if (aiSummary) {
-                    results.push(aiSummary);
-                }
+                results.push(parsed);
             } catch (messageError) {
                 console.error(`Failed to fetch message ${metadata.id}:`, messageError);
             }
@@ -161,13 +183,11 @@ async function fetchInboxMessages(oauth2Client, count = 1) {
 
 
 async function startGoogleLogin() {
-    // Create a temporary local HTTP server to receive the OAuth callback.
     let oauth2Client;
     let serverPort = null;
     const server = http.createServer(async (req, res) => {
         try {
             console.log('OAuth callback received. req.url=', req.url, 'host=', req.headers.host);
-            // Use the captured serverPort (set when server.listen fires). Fallback to server.address().port
             const portToUse = serverPort || (server.address() && server.address().port);
             if (!portToUse) {
                 console.error('Unable to determine server port for callback URL (server.address() is null)');
@@ -224,22 +244,34 @@ async function startGoogleLogin() {
                             idToken: tokens.id_token,
                             audience: CLIENT_ID,
                         });
-                        profilePayload = ticket.getPayload(); // Contains name/email when profile/email scopes present
+                        profilePayload = ticket.getPayload(); // name, email, etc.
                         console.log('Logged in user name:', profilePayload && profilePayload.name);
                     } else {
                         console.warn('ID token missing from OAuth response; profile data unavailable.');
                     }
                     console.log('Login successful. Tokens:', tokens);
 
-                    const inboxEmails = await fetchInboxMessages(oauth2Client, 10);
-
                     const win = BrowserWindow.getAllWindows()[0];
-                    if (win) {
-                        win.webContents.send('auth-success', {
-                            tokens,
-                            profile: profilePayload,
-                        });
-                        win.webContents.send('inbox-emails', inboxEmails);
+                    const sendToWindow = (channel, payload) => {
+                        if (win && !win.isDestroyed()) {
+                            win.webContents.send(channel, payload);
+                        }
+                    };
+
+                    sendToWindow('auth-success', {
+                        tokens,
+                        profile: profilePayload,
+                    });
+
+                    const hasSummaries = Boolean(openai);
+                    sendToWindow('summaries-loading', { loading: true, hasSummaries });
+
+                    let inboxEmails = [];
+                    try {
+                        inboxEmails = await fetchInboxMessages(oauth2Client, 10);
+                    } finally {
+                        sendToWindow('inbox-emails', inboxEmails);
+                        sendToWindow('summaries-loading', { loading: false, hasSummaries });
                     }
                 } catch (error) {
                     console.error('Error exchanging code for tokens:', error);
@@ -258,7 +290,6 @@ async function startGoogleLogin() {
         }
     });
 
-    // find a random port on localhost
     server.on('error', (err) => {
         console.error('OAuth callback server error:', err);
     });
@@ -302,6 +333,19 @@ async function handleGoogleAuthRedirect(url) {
         }
     }
 }
+
+async function testCall() {
+    try {
+        const aiResponse = await openai.responses.create({
+            model: 'gpt-4.1-mini',
+            input: 'Who was the 33rd president of the United States?'
+        })
+        console.log('AI Response:', aiResponse.output_text);
+    } catch (e) {
+        console.error('Failed to generate AI response:', e);
+    }
+}
+// testCall();
 
 app.on('ready', () => {
     if (process.platform === 'win32') {

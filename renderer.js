@@ -1,11 +1,7 @@
-// Renderer script (loaded from file so CSP 'script-src \"self\"' is satisfied)
-// Binds the Sign in button to the API exposed by preload.js
-
 document.addEventListener('DOMContentLoaded', () => {
     const btn = document.getElementById('google')
     if (btn && window.electronAPI && typeof window.electronAPI.startGoogleLogin === 'function') {
         btn.addEventListener('click', () => {
-            // Ask the main process to start the OAuth flow (opens browser)
             window.electronAPI.startGoogleLogin()
         })
     }
@@ -13,13 +9,10 @@ document.addEventListener('DOMContentLoaded', () => {
     const emailContainer = document.getElementById('email-display');
     if (emailContainer) {
         emailContainer.textContent = 'Sign in to load your inbox.';
+        emailContainer.style.textAlign = 'center';
     }
-
-    // For testing only: call from devtools console to simulate redirect handling
-    // window.electronAPI.triggerAuthRedirect('emailreader://callback?code=...')
 })
 
-// Listen for auth success and update the UI
 if (window.electronAPI && typeof window.electronAPI.onAuthSuccess === 'function') {
     window.electronAPI.onAuthSuccess((data) => {
         const { tokens, profile } = data || {};
@@ -39,8 +32,8 @@ if (window.electronAPI && typeof window.electronAPI.onAuthSuccess === 'function'
         status.style.marginTop = '20px';
         status.style.fontWeight = 'bold';
 
-    const displayName = profile && (profile.name || profile.email);
-    status.textContent = displayName ? `Welcome, ${displayName}` : 'Signed in';
+        const displayName = profile && (profile.name || profile.email);
+        status.textContent = displayName ? `Welcome, ${displayName}` : 'Signed in';
         console.log('Received tokens from main:', tokens);
         if (profile) {
             console.log('User profile:', profile);
@@ -48,10 +41,35 @@ if (window.electronAPI && typeof window.electronAPI.onAuthSuccess === 'function'
 
         const emailContainer = document.getElementById('email-display');
         if (emailContainer) {
-            emailContainer.textContent = 'Loading your inbox...';
+            emailContainer.textContent = 'Fetching your inbox and generating AI summaries...';
         }
     });
 }
+
+
+if (window.electronAPI && typeof window.electronAPI.onSummariesLoading === 'function') {
+    window.electronAPI.onSummariesLoading((payload) => {
+        const { loading, hasSummaries } = payload || {};
+        const container = document.getElementById('email-display');
+        if (!container) return;
+
+        if (loading) {
+            container.innerHTML = '';
+            const indicator = document.createElement('div');
+            indicator.id = 'summary-loading-indicator';
+            indicator.className = 'summary-loading-indicator';
+            indicator.textContent = hasSummaries ? 'Generating summaries...' : 'Loading your inbox...';
+            container.appendChild(indicator);
+            return;
+        }
+
+        const existingIndicator = document.getElementById('summary-loading-indicator');
+        if (existingIndicator) {
+            existingIndicator.remove();
+        }
+    });
+}
+
 
 if (window.electronAPI && typeof window.electronAPI.onInboxEmails === 'function') {
     window.electronAPI.onInboxEmails((emails) => {
@@ -86,10 +104,18 @@ if (window.electronAPI && typeof window.electronAPI.onInboxEmails === 'function'
                 item.appendChild(fromLine);
             }
 
+            if (email && email.aiSummary) {
+                const summary = document.createElement('div');
+                summary.className = 'email-ai-summary';
+                summary.textContent = email.aiSummary;
+                item.appendChild(summary);
+            }
+
             list.appendChild(item);
         });
 
         container.appendChild(list);
+        // testCall();
     });
 }
 

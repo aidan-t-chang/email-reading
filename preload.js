@@ -7,5 +7,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   triggerAuthRedirect: (url) => ipcRenderer.send('auth-redirect', url),
   // Allow renderer to listen for auth success messages from main
   onAuthSuccess: (callback) => ipcRenderer.on('auth-success', (event, data) => callback(data)),
-  onInboxEmails: (callback) => ipcRenderer.on('inbox-emails', (event, emails) => callback(emails))
+  onInboxEmails: (callback) => ipcRenderer.on('inbox-emails', (event, emails) => callback(emails)),
+  onSummariesLoading: (callback) => ipcRenderer.on('summaries-loading', (event, payload) => callback(payload))
 })

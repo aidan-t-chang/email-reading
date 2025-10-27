@@ -33,7 +33,6 @@ p {
     border-radius: 6px;
     background-color: #fafafa;
     text-align: left;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.05);
 }
 
 .email-display h2 {
@@ -73,6 +72,18 @@ p {
 }
 
 .email-from {
+    color: #3f3939;
+}
+
+.email-ai-summary {
+    margin-top: 6px;
+    padding-left: 16px;
+    color: #222;
+    font-size: 0.95rem;
+}
+
+.summary-loading-indicator {
+    text-align: center;
+    font-size: 1rem;
     color: #555;
-    font-style: italic;
 }
