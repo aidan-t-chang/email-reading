@@ -41,7 +41,7 @@ if (window.electronAPI && typeof window.electronAPI.onAuthSuccess === 'function'
 
         const emailContainer = document.getElementById('email-display');
         if (emailContainer) {
-            emailContainer.textContent = 'Fetching your inbox and generating AI summaries...';
+            emailContainer.textContent = 'Fetching your inbox and looking for dates and times...';
         }
     });
 }
@@ -58,7 +58,7 @@ if (window.electronAPI && typeof window.electronAPI.onSummariesLoading === 'func
             const indicator = document.createElement('div');
             indicator.id = 'summary-loading-indicator';
             indicator.className = 'summary-loading-indicator';
-            indicator.textContent = hasSummaries ? 'Generating summaries...' : 'Loading your inbox...';
+            indicator.textContent = hasSummaries ? 'Looking for dates and times...' : 'Loading your inbox...';
             container.appendChild(indicator);
             return;
         }

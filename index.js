@@ -4,7 +4,7 @@ const path = require('path');
 const http = require('http');
 const { URL } = require('url');
 const { OAuth2Client } = require('google-auth-library');
-const OpenAI = require('openai');
+const { GoogleGenAI } = require('@google/genai');
 
 
 const REDIRECT_PROTOCOL = 'emailreader';
@@ -16,12 +16,11 @@ const SCOPES = [
 ];
 let createWindow;
 
-const oauthConfigPath = path.join(__dirname, 'oauth.config.json');
-const openaiConfigPath = path.join(__dirname, 'openaiconfig.json');
 let CLIENT_ID;
 let CLIENT_SECRET;
-let OPENAI_API_KEY;
+const oauthConfigPath = path.join(__dirname, 'oauth.config.json');
 
+// get the client id
 try {
     const rawConfig = fs.readFileSync(oauthConfigPath, 'utf-8');
     const parsedConfig = JSON.parse(rawConfig);
@@ -37,33 +36,7 @@ try {
     throw err;
 }
 
-OPENAI_API_KEY = process.env.OPENAI_API_KEY || null;
-if (!OPENAI_API_KEY) {
-    try {
-        const rawOpenAIConfig = fs.readFileSync(openaiConfigPath, 'utf-8');
-        const parsedOpenAIConfig = JSON.parse(rawOpenAIConfig);
-        OPENAI_API_KEY = parsedOpenAIConfig.API_KEY || parsedOpenAIConfig.apiKey || null;
-        if (!OPENAI_API_KEY) {
-            throw new Error('Missing API_KEY property');
-        }
-    } catch (err) {
-        if (err && err.code === 'ENOENT') {
-            console.warn('[OpenAI] API key not available; AI summaries disabled.');
-        } else {
-            console.error('[OpenAI] Failed to load API key from openaiconfig.json.', err);
-        }
-    }
-}
-
-let openai = null;
-if (OPENAI_API_KEY) {
-    try {
-        openai = new OpenAI({ apiKey: OPENAI_API_KEY });
-    } catch (err) {
-        console.error('[OpenAI] Failed to initialize client.', err);
-    }
-}
-
+const gemini = new GoogleGenAI({});
 
 function decodeBase64Url(input) {
     if (!input) return '';
@@ -123,12 +96,29 @@ function parseGmailMessage(message) {
     };
 }
 
-async function fetchInboxMessages(oauth2Client, count = 10) {
+async function fetchInboxMessages(oauth2Client, limit = 50) {
+    // past weeks emails with a limit of 50 emails
+
     try {
+        const date = new Date();
+        const curYear = date.getFullYear();
+        const curMonth = date.getMonth();
+        const curDay = date.getDate() + 1; // add one to include today
+        const curFormat = `${curYear}/${curMonth + 1}/${curDay}`;
+
+        const oneWeekAgo = new Date(curYear, curMonth, curDay - 7);
+        const oneWeekAgoYear = oneWeekAgo.getFullYear();
+        const oneWeekAgoMonth = oneWeekAgo.getMonth();
+        const oneWeekAgoDay = oneWeekAgo.getDate();
+        const lastWeekFormat = `${oneWeekAgoYear}/${oneWeekAgoMonth + 1}/${oneWeekAgoDay}`;
+
+        const urlToUse = 'https://gmail.googleapis.com/gmail/v1/users/me/messages?q=in:inbox ' + `after:${lastWeekFormat} before:${curFormat}`;
+
+        console.log(`Reading emails from ${lastWeekFormat} to ${curFormat}`);
         const listResponse = await oauth2Client.request({
-            url: 'https://gmail.googleapis.com/gmail/v1/users/me/messages',
+            url: urlToUse,
             params: {
-                maxResults: count,
+                maxResults: limit,
                 labelIds: ['INBOX'],
             },
         });
@@ -150,22 +140,35 @@ async function fetchInboxMessages(oauth2Client, count = 10) {
                     },
                 });
                 const parsed = parseGmailMessage(messageResponse.data);
+                // const test = testCall();
+                // console.log(test);
                 if (!parsed) continue;
                 const summarySource = parsed.body || parsed.snippet;
-                if (openai && summarySource) {
+                if (gemini && summarySource) {
                     try {
-                        const aiSummary = await openai.responses.create({
-                            model: 'gpt-4.1-mini',
-                            input: `Summarize this email in one sentence and respond with any important times and dates in the format (date, time). 
-                            If there are no important dates, do not respond with anything but still provide a summary. \n\n${summarySource}`,
+                        const aiSummary = await gemini.models.generateContent({
+                            // gemini 2.0 flash
+
+                            // make a file called prompts and put all the prompts in there
+                            // max 1 sentence
+                            // prompts should output json with tasks in a specified format
+                            // name of the task, day of the week it is on, month, does the task have a duration, due time 
+                            // duration and due time should be optional
+                            // should be outputted in the format of tasks
+                            
+
+                            model: 'gemini-2.0-flash', // UPDATE THIS to use whatever model you prefer - gpt 4.1 mini and gpt-5-nano are optimized for cost and speed
+                            contents: `Respond with any important times and dates in the format event: date, time. If a date and time can be found, also add the event for which the date and time is for.
+                            If either the date or time is missing, do not respond with anything. If there is no date or time, do not respond with anything.
+                            If there are no important dates, do not respond with anything.  \n\n${summarySource}`,
                         });
-                        const summaryText = (aiSummary?.output_text || '').trim();
+                        const summaryText = (aiSummary?.text || '').trim();
                         if (summaryText) {
                             console.log(summaryText);
                             parsed.aiSummary = summaryText;
                         }
                     } catch (e) {
-                        console.error('Failed to generate AI summary:', e);
+                        console.error('Failed to find important dates and times:', e);
                     }
                 }
                 results.push(parsed);
@@ -263,12 +266,12 @@ async function startGoogleLogin() {
                         profile: profilePayload,
                     });
 
-                    const hasSummaries = Boolean(openai);
+                    const hasSummaries = Boolean(gemini);
                     sendToWindow('summaries-loading', { loading: true, hasSummaries });
 
                     let inboxEmails = [];
                     try {
-                        inboxEmails = await fetchInboxMessages(oauth2Client, 10);
+                        inboxEmails = await fetchInboxMessages(oauth2Client, 50);
                     } finally {
                         sendToWindow('inbox-emails', inboxEmails);
                         sendToWindow('summaries-loading', { loading: false, hasSummaries });
@@ -309,6 +312,8 @@ async function startGoogleLogin() {
         const authURL = oauth2Client.generateAuthUrl({
             access_type: 'offline',
             scope: SCOPES.join(' '),
+            client_id: CLIENT_ID,
+            redirect_uri: redirectUri,
             // prompt: 'consent' 
         });
         console.log(`OAuth server listening on ${redirectUri}`);
@@ -336,16 +341,64 @@ async function handleGoogleAuthRedirect(url) {
 
 async function testCall() {
     try {
-        const aiResponse = await openai.responses.create({
-            model: 'gpt-4.1-mini',
-            input: 'Who was the 33rd president of the United States?'
-        })
-        console.log('AI Response:', aiResponse.output_text);
+        const aiSummary = await gemini.models.generateContent({
+        // gemini 2.0 flash
+
+        // make a file called prompts and put all the prompts in there
+        // max 1 sentence
+        // prompts should output json with tasks in a specified format
+        // name of the task, day of the week it is on, month, does the task have a duration, due time 
+        // duration and due time should be optional
+        // should be outputted in the format of tasks
+        
+
+        model: 'gemini-2.0-flash',
+        contents: `Who is the 33rd president of the United States?`,
+        });
+        console.log(aiSummary.text);
     } catch (e) {
         console.error('Failed to generate AI response:', e);
     }
 }
 // testCall();
+
+async function generateResponse(patterns, content, emails) {
+    // patterns: patterns that the user has saved
+    // content: other scheduled items
+    // emails: emails that the user has received (max 50, last week)
+    contents = [
+        `Context:
+        - This is a JavaScript application written in Electron
+        - The application is a scheduling app that helps users manage their tasks and appointments.
+        - Patterns are objects that the user makes to help organize tasks.
+        Patterns:`,
+        patterns,
+        `Here are the other items that the user has scheduled:`,
+        content,
+        `Additionally, here are emails that the user has received: `,
+        emails,
+        `Your job:
+        All outputs should be in a JSON format. The matching pattern, if available, should be "pattern:".
+        The topic should be "topic:". The date should be "date:". The time should be "time:".
+        Search the emails for both a date and time. If there is no date or no time, make the JSON value null.
+        If you find both a date and time, look at the patterns and see if the event matches any of the patterns.
+        For example, if there are tasks or patterns that use "HW" instead of "homework", and the email mentions "homework", use the "HW" instead.
+        If possible, respond with the matching pattern, the date, and the time, in the JSON format.`
+    ]
+    const response = await gemini.models.generateContent({
+        model: 'gemini-2.0-flash',
+        contents: contents.join('\n')
+    })
+
+    fs.writeFile('prompts.json', JSON.stringify(response), err => {
+        if (err) {
+            console.error('Error writing to file: ', err);
+        }
+        else {
+            console.log('File written successfully');
+        }
+    })
+}
 
 app.on('ready', () => {
     if (process.platform === 'win32') {

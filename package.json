@@ -25,5 +25,8 @@
   "devDependencies": {
     "electron": "^38.4.0",
     "nodemon": "^3.1.10"
+  },
+  "dependencies": {
+    "@google/genai": "^1.28.0"
   }
 }
